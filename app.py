@@ -8,6 +8,8 @@ import requests
 from flask import Flask, request, jsonify
 from dotenv import load_dotenv
 import time
+from datetime import datetime
+
 
 # ------------------- Load Env -------------------
 env = os.getenv("ENV", "Development")
@@ -29,6 +31,12 @@ dynamodb = boto3.resource(
     aws_secret_access_key=aws_secret_key
 )
 
+lambda_client = boto3.client('lambda',region_name=aws_region,
+    aws_access_key_id=aws_access_key,
+    aws_secret_access_key=aws_secret_key)  
+
+
+
 Grade_and_Subject = dynamodb.Table(os.getenv("GRADE_SUBJECT_TABLE", "Grade_and_Subject"))
 Investor = dynamodb.Table(os.getenv("INVESTOR_TABLE", "Investor"))
 # ICP = dynamodb.Table(os.getenv("ICP_TABLE", "ICP"))
@@ -37,14 +45,15 @@ subject_table = dynamodb.Table(os.getenv("SUBJECT_TABLE", "Grade_and_Subject"))
 
 
 # Extra tables used by ITP checks
-Question_Prod = dynamodb.Table("Question_Prod")
-User_ITP_Prod = dynamodb.Table("User_Infinite_TestSeries_Prod")
+Question_Prod = dynamodb.Table("Question")
+User_ITP_Prod = dynamodb.Table("User_Infinite_TestSeries")
 
 # ------------------- API Endpoints -------------------
 url_insert_subject = os.getenv("URL_INSERT_SUBJECT")
 url_get_school = os.getenv("URL_GET_SCHOOL")
 url_insert_lesson_planner = os.getenv("URL_INSERT_LESSON_PLANNER")
-url_itp_initialize = "https://nycoxziw67.execute-api.us-west-2.amazonaws.com/Production/api/initialize"
+url_itp_initialize = "https://t9or7o19o8.execute-api.us-west-2.amazonaws.com/itpGenerate/api/initialize" #use the below API
+# https://nycoxziw67.execute-api.us-west-2.amazonaws.com/Production/api/initialize
 url_icp_generate = os.getenv("URL_ICP_GENERATE")
 
 # ------------------- Helper Functions -------------------
@@ -118,12 +127,13 @@ def initialize_itp(itp_payload):
     headers = {"Content-Type": "application/json"}
     print("INIT PAYLOAD:", json.dumps(itp_payload, indent=2))
     resp = requests.post(url_itp_initialize, headers=headers, data=json.dumps(itp_payload))
-    print("INIT RAW STATUS:", resp.status_code)
-    print("INIT RAW TEXT:", resp.text)
-    try:
-        return resp.json()
-    except Exception:
-        return {"statusCode": resp.status_code, "body": resp.text}
+    # print("INIT RAW STATUS:", resp.status_code)
+    # print("INIT RAW TEXT:", resp.text)
+    return resp.text
+    # try:
+    #     return resp.json()
+    # except Exception:
+    #     return {"statusCode": resp.status_code, "body": resp.text}
 
 
 def check_itp_status_local(itp_id, user_id=None, pre_defined=True):
@@ -197,8 +207,8 @@ def process_all():
         lesson_uuid = lesson_data["lesson_planner_UUID"]
 
         now = strftime("%Y-%m-%d,%H:%M:%S", gmtime())
-        tenantEmail = "sierracanyon@edyou.com"
-        tenantName = "Sierra Canyon"
+        tenantEmail = "testalli@yopmail.com" #Production Variable change to SC production email
+        tenantName = "Sc school"
         icon = "https://pollydemo2022.s3.us-west-2.amazonaws.com/icons/Geometry.svg"
 
         grade = lesson_data.get("grade", "")
@@ -243,18 +253,27 @@ def process_all():
 def api_generate_itp():
     try:
         data = request.json
-        init_resp = initialize_itp(data)
+        init_resp = json.loads(initialize_itp(data))
 
-        if init_resp.get("statusCode") == 400 and "Module Already Generated" in str(init_resp):
-            return jsonify({"status": "already_generated", "message": "Already generated"}), 200
+        print("*******************************")
+        print(init_resp)
+        print(init_resp['statusCode'])
+        print("*******************************")
 
-        if init_resp.get("statusCode") == 200 and init_resp.get("body", {}).get("generating"):
-            itp_id = init_resp["body"]["id"]
+        # Case 1: ITP already generated
+        if init_resp['statusCode'] == 400:
+            return jsonify({'body': init_resp['body'], 'statusCode': 400}), 400
+
+        # Case 2: Generating → start polling Question_Prod
+        if init_resp['statusCode'] == 200 and init_resp['body'].get("generating") is True:
+            itp_id = init_resp['body']["id"]
             user_id = data.get("user_id")
 
-            max_attempts = 80
+            max_attempts = 80   # ~4 minutes if interval=3s
+            interval = 3        # seconds
+
             for attempt in range(max_attempts):
-                time.sleep(3)
+                time.sleep(interval)
                 check_resp = check_itp_status_local(itp_id, user_id, pre_defined=True)
                 print(f"[POLL LOOP] Attempt {attempt+1}/{max_attempts}: {check_resp}")
 
@@ -265,45 +284,41 @@ def api_generate_itp():
                         "data": check_resp
                     }), 200
 
-            return jsonify({"status": "timeout", "message": "ITP generation still in progress after 4 minutes", "id": itp_id}), 202
+            # Timed out
+            return jsonify({
+                "status": "timeout",
+                "message": "ITP generation still in progress after 4 minutes",
+                "id": itp_id
+            }), 202
 
-        return jsonify({"status": "error", "message": "Unexpected initialize response", "response": init_resp}), 400
+        # Case 3: Unexpected but OK → just return init response
+        if init_resp['statusCode'] == 200:
+            return jsonify({'body': init_resp['body'], 'statusCode': 200}), 200
+
+        # Fallback
+        return jsonify({
+            "status": "error",
+            "message": "Unexpected initialize response",
+            "response": init_resp
+        }), 400
 
     except Exception as e:
-        return jsonify({"status": "error", "error": str(e), "trace": traceback.format_exc()}), 500
+        return jsonify({
+            "status": "error",
+            "error": str(e),
+            "trace": traceback.format_exc()
+        }), 500
 
 
 @app.route("/generate_icp", methods=["POST"])
 def api_generate_icp():
-    try:
+    # try:
         data = request.json
-        print("[ICP] Incoming request:", json.dumps(data, indent=2))
+        # print("[ICP] Incoming request:", json.dumps(data, indent=2))
 
         subject_id = data.get("subject_id")
         topic_id = data.get("topic_id")
-        if not subject_id:
-            return jsonify({"status": "error", "message": "subject_id missing"}), 400
-
-        subj_resp = subject_table.get_item(Key={"id": subject_id})
-        if "Item" not in subj_resp:
-            return jsonify({"status": "error", "message": f"No subject found for id {subject_id}"}), 404
-
-        tenantEmail = subj_resp["Item"]["tenantEmail"]
-
-
-        # ---------------- Step 1: Get tenantEmail ----------------
-        subj_resp = subject_table.get_item(Key={"id": subject_id})
-        if "Item" not in subj_resp:
-            return jsonify({"status": "error", "message": f"Subject {subject_id} not found"}), 404
-
-        tenantEmail = subj_resp["Item"]["tenantEmail"]
-        print(f"[ICP] Tenant email resolved: {tenantEmail}")
-
-        # ---------------- Step 2: Check if ICP already exists ----------------
-        icp_check = icp_table.get_item(Key={"email": tenantEmail, "id": topic_id})
-        if "Item" in icp_check:
-            print(f"[ICP] Module already exists for email={tenantEmail}, topic_id={topic_id}")
-            return jsonify({"status": "already_exists", "message": "Module Already Generated"}), 200
+        tenantEmail = data.get("tenantEmail")
 
         # ---------------- Step 3: Call Generate Course API ----------------
         generate_payload = {
@@ -312,64 +327,64 @@ def api_generate_icp():
             "icp_UUID": data["icp_UUID"],
             "description": data["description"]
         }
-        print("[ICP] Generate payload:", json.dumps(generate_payload, indent=2))
+        # print("[ICP] Generate payload:", json.dumps(generate_payload, indent=2))
 
         resp_generate = requests.post(
             url_icp_generate,
             headers={"Content-Type": "application/json"},
             data=json.dumps(generate_payload)
         )
+
+        # print
         print(f"[ICP] Generate API status: {resp_generate.status_code}")
         print(f"[ICP] Generate API raw text (first 500 chars): {resp_generate.text[:500]}")
-
-        if resp_generate.status_code != 200:
-            return jsonify({
-                "status": "error",
-                "message": "Failed to generate ICP course",
-                "status_code": resp_generate.status_code,
-                "response": resp_generate.text
-            }), 500
-
-        gen_resp = resp_generate.json()
-        if "course" not in gen_resp:
-            return jsonify({
-                "status": "error",
-                "message": "Generate ICP did not return a course",
-                "response": gen_resp
-            }), 500
-
-        print("[ICP] Parsed generate response:", json.dumps(gen_resp, indent=2)[:500])
-
-        # ---------------- Step 4: Store ICP in DynamoDB ----------------
-        icp_item = {
-            "email": tenantEmail.lower(),
-            "id": topic_id,
-            "body": {
-                "pre-defined": True,
+        
+        if resp_generate.status_code == 200:
+            resp = json.loads(resp_generate.text)
+            payload_1 ={
+                "user_id":tenantEmail,
+                "body":{   
+                "module": "ICP",
+                "body": resp["course"],
+                "env": "development", #production
                 "subject_id": subject_id,
-                "topic_id": topic_id,
-                "id": topic_id
-            },
-            "env": data.get("env", "development"),
-            "course": gen_resp["course"]
-        }
+                "topic_id": topic_id
+            }}
 
-        icp_table.put_item(Item=icp_item)
-        print(f"[ICP STORE] Saved ICP for email={tenantEmail}, id={topic_id}")
+            invoke_resp = invoke_lambda(payload_1)
 
-        return jsonify({
-            "status": "success",
-            "message": "ICP course generated and stored",
-            "id": topic_id,
-            "email": tenantEmail
-        }), 200
+            if invoke_resp["statusCode"] == 200:
+                return jsonify({
+                    "status": invoke_resp["body"]
+                }), 200 
 
-    except Exception as e:
-        return jsonify({
-            "status": "error",
-            "error": str(e),
-            "trace": traceback.format_exc()
-        }), 500
+            elif invoke_resp["statusCode"] == 400:
+                return jsonify({
+                    "status": invoke_resp["body"]
+                }), 400 
+
+
+def invoke_lambda(payload):
+    # The name of your Lambda function
+    function_name = 'createPredefinedModule'
+
+    # Payload received from POST request
+    
+    alias_name = 'Development' #Production
+    # Invoke Lambda
+    response = lambda_client.invoke(
+        FunctionName=function_name,
+        InvocationType='RequestResponse',  # 'Event' for async, 'RequestResponse' for sync
+        Payload=json.dumps(payload),
+        Qualifier=alias_name
+    )
+
+    # Read response from Lambda
+    response_payload = response['Payload'].read()
+    result = json.loads(response_payload)
+
+    return result
+
 
 
 if __name__ == "__main__":
