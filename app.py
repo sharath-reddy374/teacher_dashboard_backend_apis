@@ -31,7 +31,10 @@ dynamodb = boto3.resource(
 
 Grade_and_Subject = dynamodb.Table(os.getenv("GRADE_SUBJECT_TABLE", "Grade_and_Subject"))
 Investor = dynamodb.Table(os.getenv("INVESTOR_TABLE", "Investor"))
-ICP = dynamodb.Table(os.getenv("ICP_TABLE", "ICP"))
+# ICP = dynamodb.Table(os.getenv("ICP_TABLE", "ICP"))
+icp_table = dynamodb.Table(os.getenv("ICP_TABLE", "ICP"))
+subject_table = dynamodb.Table(os.getenv("SUBJECT_TABLE", "Grade_and_Subject"))
+
 
 # Extra tables used by ITP checks
 Question_Prod = dynamodb.Table("Question_Prod")
@@ -276,7 +279,33 @@ def api_generate_icp():
         data = request.json
         print("[ICP] Incoming request:", json.dumps(data, indent=2))
 
-        # Step 1: Generate Course
+        subject_id = data.get("subject_id")
+        topic_id = data.get("topic_id")
+        if not subject_id:
+            return jsonify({"status": "error", "message": "subject_id missing"}), 400
+
+        subj_resp = subject_table.get_item(Key={"id": subject_id})
+        if "Item" not in subj_resp:
+            return jsonify({"status": "error", "message": f"No subject found for id {subject_id}"}), 404
+
+        tenantEmail = subj_resp["Item"]["tenantEmail"]
+
+
+        # ---------------- Step 1: Get tenantEmail ----------------
+        subj_resp = subject_table.get_item(Key={"id": subject_id})
+        if "Item" not in subj_resp:
+            return jsonify({"status": "error", "message": f"Subject {subject_id} not found"}), 404
+
+        tenantEmail = subj_resp["Item"]["tenantEmail"]
+        print(f"[ICP] Tenant email resolved: {tenantEmail}")
+
+        # ---------------- Step 2: Check if ICP already exists ----------------
+        icp_check = icp_table.get_item(Key={"email": tenantEmail, "id": topic_id})
+        if "Item" in icp_check:
+            print(f"[ICP] Module already exists for email={tenantEmail}, topic_id={topic_id}")
+            return jsonify({"status": "already_exists", "message": "Module Already Generated"}), 200
+
+        # ---------------- Step 3: Call Generate Course API ----------------
         generate_payload = {
             "topic": data["topic"],
             "audience": data["audience"],
@@ -302,28 +331,45 @@ def api_generate_icp():
             }), 500
 
         gen_resp = resp_generate.json()
+        if "course" not in gen_resp:
+            return jsonify({
+                "status": "error",
+                "message": "Generate ICP did not return a course",
+                "response": gen_resp
+            }), 500
+
         print("[ICP] Parsed generate response:", json.dumps(gen_resp, indent=2)[:500])
 
-        if "course" not in gen_resp:
-            return jsonify({"status": "error", "message": "Generate ICP did not return a course", "response": gen_resp}), 500
+        # ---------------- Step 4: Store ICP in DynamoDB ----------------
+        icp_item = {
+            "email": tenantEmail.lower(),
+            "id": topic_id,
+            "body": {
+                "pre-defined": True,
+                "subject_id": subject_id,
+                "topic_id": topic_id,
+                "id": topic_id
+            },
+            "env": data.get("env", "development"),
+            "course": gen_resp["course"]
+        }
 
-        # Step 2: Store directly into DynamoDB
-        email = data.get("email", "sierracanyon@edyou.com")
-        topic_id = data.get("topic_id") or gen_resp["course"]["id"]
+        icp_table.put_item(Item=icp_item)
+        print(f"[ICP STORE] Saved ICP for email={tenantEmail}, id={topic_id}")
 
-        store_resp = store_icp_direct(gen_resp, email, topic_id)
-
-        if store_resp["statusCode"] == 200:
-            return jsonify({
-                "status": "success",
-                "message": "ICP course generated and stored in DynamoDB",
-                "data": store_resp["body"]
-            }), 200
-        else:
-            return jsonify({"status": "error", "message": store_resp["body"]["message"]}), 500
+        return jsonify({
+            "status": "success",
+            "message": "ICP course generated and stored",
+            "id": topic_id,
+            "email": tenantEmail
+        }), 200
 
     except Exception as e:
-        return jsonify({"status": "error", "error": str(e), "trace": traceback.format_exc()}), 500
+        return jsonify({
+            "status": "error",
+            "error": str(e),
+            "trace": traceback.format_exc()
+        }), 500
 
 
 if __name__ == "__main__":
