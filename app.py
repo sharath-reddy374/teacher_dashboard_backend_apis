@@ -9,6 +9,8 @@ from flask import Flask, request, jsonify
 from dotenv import load_dotenv
 import time
 from datetime import datetime
+from flask import Flask, request, jsonify
+from flask_cors import CORS   # <-- Added
 
 
 # ------------------- Load Env -------------------
@@ -18,6 +20,9 @@ if os.path.exists(dotenv_path):
     load_dotenv(dotenv_path)
 
 app = Flask(__name__)
+CORS(app)  # <-- Added, allows all origins by default
+
+
 
 # ------------------- AWS DynamoDB -------------------
 aws_access_key = os.getenv("AWS_ACCESS_KEY_ID")
