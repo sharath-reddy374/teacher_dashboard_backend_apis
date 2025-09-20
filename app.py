@@ -9,20 +9,17 @@ from flask import Flask, request, jsonify
 from dotenv import load_dotenv
 import time
 from datetime import datetime
-from flask import Flask, request, jsonify
-from flask_cors import CORS   # <-- Added
+from flask_cors import CORS 
 
 
 # ------------------- Load Env -------------------
-env = os.getenv("ENV", "Development")
+env = os.getenv("ENV", "Production")
 dotenv_path = f".env.{env}"
 if os.path.exists(dotenv_path):
     load_dotenv(dotenv_path)
 
 app = Flask(__name__)
-CORS(app)  # <-- Added, allows all origins by default
-
-
+CORS(app) 
 
 # ------------------- AWS DynamoDB -------------------
 aws_access_key = os.getenv("AWS_ACCESS_KEY_ID")
@@ -47,18 +44,16 @@ Investor = dynamodb.Table(os.getenv("INVESTOR_TABLE", "Investor"))
 # ICP = dynamodb.Table(os.getenv("ICP_TABLE", "ICP"))
 icp_table = dynamodb.Table(os.getenv("ICP_TABLE", "ICP"))
 subject_table = dynamodb.Table(os.getenv("SUBJECT_TABLE", "Grade_and_Subject"))
+Question_Prod = dynamodb.Table(os.getenv("QUIZ_TABLE", "Question"))
+User_ITP_Prod = dynamodb.Table(os.getenv("USER_ITP_TABLE", "User_Infinite_TestSeries"))
 
-
-# Extra tables used by ITP checks
-Question_Prod = dynamodb.Table("Question")
-User_ITP_Prod = dynamodb.Table("User_Infinite_TestSeries")
 
 # ------------------- API Endpoints -------------------
 url_insert_subject = os.getenv("URL_INSERT_SUBJECT")
 url_get_school = os.getenv("URL_GET_SCHOOL")
 url_insert_lesson_planner = os.getenv("URL_INSERT_LESSON_PLANNER")
-url_itp_initialize = "https://t9or7o19o8.execute-api.us-west-2.amazonaws.com/itpGenerate/api/initialize" #use the below API
-# https://nycoxziw67.execute-api.us-west-2.amazonaws.com/Production/api/initialize
+# url_itp_initialize = "https://t9or7o19o8.execute-api.us-west-2.amazonaws.com/itpGenerate/api/initialize" #dev
+url_itp_initialize = "https://nycoxziw67.execute-api.us-west-2.amazonaws.com/Production/api/initialize"
 url_icp_generate = os.getenv("URL_ICP_GENERATE")
 
 # ------------------- Helper Functions -------------------
@@ -92,18 +87,54 @@ def insert_into_school(tenantEmail, grade, section, period, grade_and_subject_ui
         print(f"Failed to insert into school API: {e}")
 
 
-def insert_lesson_planner_payload(lesson_data):
-    headers = {
-        "x-api-key": os.getenv("LESSON_PLANNER_API_KEY"),
-        "Content-Type": "application/json"
-    }
-    try:
-        payload = {"lesson_planner": lesson_data}
-        resp = requests.post(url_insert_lesson_planner, headers=headers, data=json.dumps(payload))
-        print(f"Lesson planner insert response: {resp.text}")
-    except Exception as e:
-        print(f"Failed to insert lesson planner payload: {e}")
+# def insert_lesson_planner_payload(lesson_data):
+#     headers = {
+#         "x-api-key": os.getenv("LESSON_PLANNER_API_KEY"),
+#         "Content-Type": "application/json"
+#     }
+#     try:
+#         payload = {"lesson_planner": lesson_data}
+#         resp = requests.post(url_insert_lesson_planner, headers=headers, data=json.dumps(payload))
+#         print(f"Lesson planner insert response: {resp.text}")
+#     except Exception as e:
+#         print(f"Failed to insert lesson planner payload: {e}")
 
+def insert_lesson_planner_payload(lesson_data):
+    """
+    Insert lesson planner into Postgres via API Gateway.
+    Exact shape expected by prod:
+    {
+      "lesson_planner": { ... includes lesson_planner_UUID ... }
+    }
+    """
+    url = "https://48czgcfeuc.execute-api.us-west-2.amazonaws.com/prod/insert?query_name=insert_lesson_planner_payload"
+    headers = {
+        "x-api-key": os.getenv("LESSON_PLANNER_API_KEY", "oxcoUnpFS89Cu43FvFMGa5ZA5C6Ykxd79sXnuJhh"),
+        "Content-Type": "application/json",
+    }
+
+    # Build EXACT payload (no "params")
+    payload = {"lesson_planner": lesson_data}
+
+    # log what we're sending
+    print("[DEBUG] Posting (NO params) payload to Postgres API:\n",
+          json.dumps(payload, indent=2)[:2000])
+
+    resp = requests.post(url, headers=headers, json=payload)
+    print(f"[Postgres API] status={resp.status_code}, response={resp.text}")
+
+    # Basic failure surfacing
+    if resp.status_code != 200:
+        raise Exception(f"Postgres insert failed (HTTP {resp.status_code}): {resp.text}")
+
+    # API returns 200 with error body in some cases; check that too
+    try:
+        body = resp.json()
+        if isinstance(body, dict) and body.get("error"):
+            raise Exception(f"Postgres insert failed: {resp.text}")
+    except ValueError:
+        # Non-JSON success body, assume OK
+        pass
 
 def update_student_subject_list(student_email, lesson_uuid):
     try:
@@ -132,13 +163,7 @@ def initialize_itp(itp_payload):
     headers = {"Content-Type": "application/json"}
     print("INIT PAYLOAD:", json.dumps(itp_payload, indent=2))
     resp = requests.post(url_itp_initialize, headers=headers, data=json.dumps(itp_payload))
-    # print("INIT RAW STATUS:", resp.status_code)
-    # print("INIT RAW TEXT:", resp.text)
     return resp.text
-    # try:
-    #     return resp.json()
-    # except Exception:
-    #     return {"statusCode": resp.status_code, "body": resp.text}
 
 
 def check_itp_status_local(itp_id, user_id=None, pre_defined=True):
@@ -172,34 +197,34 @@ def check_itp_status_local(itp_id, user_id=None, pre_defined=True):
         return {"statusCode": 500, "error": str(e)}
 
 
-# -------- ICP Helpers --------
-def store_icp_direct(course_data, email, topic_id):
-    """
-    Save generated ICP course into DynamoDB (ICP_TABLE).
-    """
-    try:
-        def convert_numbers(obj):
-            if isinstance(obj, float):
-                return Decimal(str(obj))
-            elif isinstance(obj, dict):
-                return {k: convert_numbers(v) for k, v in obj.items()}
-            elif isinstance(obj, list):
-                return [convert_numbers(v) for v in obj]
-            return obj
+# # -------- ICP Helpers --------
+# def store_icp_direct(course_data, email, topic_id):
+#     """
+#     Save generated ICP course into DynamoDB (ICP_TABLE).
+#     """
+#     try:
+#         def convert_numbers(obj):
+#             if isinstance(obj, float):
+#                 return Decimal(str(obj))
+#             elif isinstance(obj, dict):
+#                 return {k: convert_numbers(v) for k, v in obj.items()}
+#             elif isinstance(obj, list):
+#                 return [convert_numbers(v) for v in obj]
+#             return obj
 
-        icp_item = {
-            "email": email.lower(),
-            "id": topic_id,
-            "course": convert_numbers(course_data["course"])
-        }
+#         icp_item = {
+#             "email": email.lower(),
+#             "id": topic_id,
+#             "course": convert_numbers(course_data["course"])
+#         }
 
-        ICP.put_item(Item=icp_item)
-        print(f"[ICP STORE] Saved ICP for email={email}, id={topic_id}")
-        return {"statusCode": 200, "body": {"message": "Stored in DynamoDB", "id": topic_id, "email": email}}
+#         ICP.put_item(Item=icp_item)
+#         print(f"[ICP STORE] Saved ICP for email={email}, id={topic_id}")
+#         return {"statusCode": 200, "body": {"message": "Stored in DynamoDB", "id": topic_id, "email": email}}
 
-    except Exception as e:
-        print(f"[ICP STORE ERROR] {e}")
-        return {"statusCode": 500, "body": {"message": f"Error storing course: {str(e)}"}}
+#     except Exception as e:
+#         print(f"[ICP STORE ERROR] {e}")
+#         return {"statusCode": 500, "body": {"message": f"Error storing course: {str(e)}"}}
 
 
 # ------------------- Flask Endpoints -------------------
@@ -212,8 +237,8 @@ def process_all():
         lesson_uuid = lesson_data["lesson_planner_UUID"]
 
         now = strftime("%Y-%m-%d,%H:%M:%S", gmtime())
-        tenantEmail = "testalli@yopmail.com" #Production Variable change to SC production email
-        tenantName = "Sc school"
+        tenantEmail = "sierracanyon@edyou.com" #Production Variable change to SC production email
+        tenantName = "Sierra Canyon"
         icon = "https://pollydemo2022.s3.us-west-2.amazonaws.com/icons/Geometry.svg"
 
         grade = lesson_data.get("grade", "")
@@ -351,7 +376,7 @@ def api_generate_icp():
                 "body":{   
                 "module": "ICP",
                 "body": resp["course"],
-                "env": "development", #production
+                "env": "production", #production
                 "subject_id": subject_id,
                 "topic_id": topic_id
             }}
@@ -375,7 +400,7 @@ def invoke_lambda(payload):
 
     # Payload received from POST request
     
-    alias_name = 'Development' #Production
+    alias_name = 'Production' #Production
     # Invoke Lambda
     response = lambda_client.invoke(
         FunctionName=function_name,
