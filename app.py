@@ -147,9 +147,15 @@ def insert_lesson_planner_payload(lesson_data):
 
 def update_student_subject_list(student_email, lesson_uuid):
     try:
+        # First attempt: as-is
         resp = Investor.get_item(Key={"email": student_email})
+        
+        # If not found, retry with lowercase
+        if "Item" not in resp and student_email.lower() != student_email:
+            resp = Investor.get_item(Key={"email": student_email.lower()})
+
         if "Item" not in resp:
-            print(f"Student {student_email} not found in Investor")
+            print(f"Student {student_email} not found in Investor (even after lowercase check)")
             return
 
         student_item = resp["Item"]
@@ -158,13 +164,14 @@ def update_student_subject_list(student_email, lesson_uuid):
         if lesson_uuid not in subject_list:
             subject_list.append(lesson_uuid)
             Investor.update_item(
-                Key={"email": student_email},
+                Key={"email": student_item["email"]},  # use the actual stored key
                 UpdateExpression="SET subject_list = :s",
                 ExpressionAttributeValues={":s": subject_list}
             )
-            print(f"Added {lesson_uuid} to {student_email}'s subject_list")
+            print(f"Added {lesson_uuid} to {student_item['email']}'s subject_list")
     except Exception as e:
         print(f"Error updating student {student_email}: {e}")
+
 
 
 # -------- ITP Helpers --------
