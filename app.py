@@ -18,7 +18,7 @@ dotenv_path = f".env.{env}"
 if os.path.exists(dotenv_path):
     load_dotenv(dotenv_path)
 
-
+app = Flask(__name__)
 CORS(
     app,
     resources={r"/*": {"origins": r".*"}},   # echo any Origin back
