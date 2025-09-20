@@ -19,7 +19,11 @@ if os.path.exists(dotenv_path):
     load_dotenv(dotenv_path)
 
 app = Flask(__name__)
-CORS(app) 
+CORS(app,
+     resources={r"/*": {"origins": "*"}},
+     supports_credentials=False,
+     allow_headers=["Content-Type", "Authorization", "x-api-key"],
+     methods=["GET", "POST", "OPTIONS"])
 
 # ------------------- AWS DynamoDB -------------------
 aws_access_key = os.getenv("AWS_ACCESS_KEY_ID")
