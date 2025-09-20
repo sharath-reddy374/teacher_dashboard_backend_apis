@@ -255,7 +255,7 @@ def process_all():
         now = strftime("%Y-%m-%d,%H:%M:%S", gmtime())
         tenantEmail = "sierracanyon@edyou.com" #Production Variable change to SC production email
         tenantName = "Sierra Canyon"
-        icon = "https://pollydemo2022.s3.us-west-2.amazonaws.com/icons/Geometry.svg"
+        icon = "https://pollydemo2022.s3.us-west-2.amazonaws.com/icons/devoir.svg"
 
         grade = lesson_data.get("grade", "")
         section = lesson_data.get("section", "")
