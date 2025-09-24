@@ -301,7 +301,9 @@ def process_all():
         grade = lesson_data.get("grade", "")
         section = lesson_data.get("section", "")
         period = lesson_data.get("period", "")
-        teacher_id = lesson_data.get("teacher_id")   # <---- expects teacher_id in request JSON
+        teacher_id = lesson_data.get("teacher_id")   # expects teacher_id in request JSON
+
+        print("=== [PROCESS_ALL START] ===")
 
         # Step 1: Dynamo insert
         item = {
@@ -321,20 +323,32 @@ def process_all():
             "Section": section
         }
         Grade_and_Subject.put_item(Item=item)
+        print("[STEP 1] Inserted into DynamoDB Grade_and_Subject")
 
         # Step 2: Insert subject into school API
         subject_id = insert_into_school(tenantEmail, grade, section, period, subject)
+        if subject_id:
+            print(f"[STEP 2] Inserted into School API, subject_id={subject_id}")
+        else:
+            print("[STEP 2] Failed to insert into School API or subject_id missing")
 
         # Step 3: Insert subject-teacher relation
         if subject_id and teacher_id:
             insert_subject_teacher_relation(subject_id, teacher_id)
+            print(f"[STEP 3] Inserted subject-teacher relation (subject_id={subject_id}, teacher_id={teacher_id})")
+        else:
+            print("[STEP 3] Skipped subject-teacher relation (missing subject_id or teacher_id)")
 
         # Step 4: Insert lesson planner
         insert_lesson_planner_payload(lesson_data)
+        print("[STEP 4] Inserted lesson planner into Postgres API")
 
         # Step 5: Update students
         for email in lesson_data.get("student", []):
             update_student_subject_list(email, lesson_uuid)
+            print(f"[STEP 5] Updated student subject list for {email}")
+
+        print("=== [PROCESS_ALL END SUCCESS] ===")
 
         return jsonify({
             "status": "success",
@@ -342,8 +356,15 @@ def process_all():
             "message": f"Subject {subject} inserted successfully, lesson planner stored, "
                        f"uuid assigned to {len(lesson_data.get('student', []))} students"
         })
+
     except Exception as e:
-        return jsonify({"status": "error", "error": str(e), "trace": traceback.format_exc()}), 400
+        print("=== [PROCESS_ALL ERROR] ===")
+        print(traceback.format_exc())
+        return jsonify({
+            "status": "error",
+            "error": str(e),
+            "trace": traceback.format_exc()
+        }), 400
 
 
 @app.route("/generate_itp", methods=["POST"])
