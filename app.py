@@ -68,7 +68,7 @@ url_icp_generate = os.getenv("URL_ICP_GENERATE")
 # ------------------- Helper Functions -------------------
 def insert_into_school(tenantEmail, grade, section, period, grade_and_subject_ui):
     headers = {
-        "x-api-key": os.getenv("SCHOOL_API_KEY"),
+        "x-api-key": os.getenv("LESSON_PLANNER_API_KEY"),
         "Content-Type": "application/json"
     }
     try:
@@ -97,7 +97,7 @@ def insert_into_school(tenantEmail, grade, section, period, grade_and_subject_ui
             if resp.status_code == 200 and resp.text.strip():
                 try:
                     body = resp.json()
-                    return body.get("subject_id")   # assumes API returns subject_id
+                    return body.get("inserted_subject_id")   # <-- correct key
                 except:
                     pass
         return None

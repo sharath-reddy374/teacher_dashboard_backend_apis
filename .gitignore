@@ -128,3 +128,5 @@ ehthumbs.db
 Thumbs.db
 myenv
 .env.Development
+.env.Production
+.env.*
