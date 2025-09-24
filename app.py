@@ -84,16 +84,57 @@ def insert_into_school(tenantEmail, grade, section, period, grade_and_subject_ui
                 school_id = data[0].get("school_id")
 
         if school_id:
-            payload = json.dumps({
+            payload = {
                 "name": grade_and_subject_ui,
                 "grade": grade,
                 "section": section,
                 "school_id": school_id,
                 "period": period
-            })
-            requests.post(url_insert_subject, headers=headers, data=payload)
+            }
+            resp = requests.post(url_insert_subject, headers=headers, json=payload)
+            print(f"[Insert Subject API] status={resp.status_code}, response={resp.text}")
+
+            if resp.status_code == 200 and resp.text.strip():
+                try:
+                    body = resp.json()
+                    return body.get("subject_id")   # assumes API returns subject_id
+                except:
+                    pass
+        return None
     except Exception as e:
         print(f"Failed to insert into school API: {e}")
+        return None
+
+
+def insert_subject_teacher_relation(subject_id, teacher_id):
+    """
+    Insert subject-teacher relation into Postgres via API Gateway.
+    """
+    url = "https://48czgcfeuc.execute-api.us-west-2.amazonaws.com/prod/query?query_name=insert_subject_teacher"
+    headers = {
+        "x-api-key": os.getenv("LESSON_PLANNER_API_KEY", "oxcoUnpFS89Cu43FvFMGa5ZA5C6Ykxd79sXnuJhh"),
+        "Content-Type": "application/json"
+    }
+
+    payload = {
+        "subject_id": str(subject_id),
+        "teacher_id": str(teacher_id),
+        "role_id": "",
+        "school_year": "",
+        "school_year_id": ""
+    }
+
+    print("[DEBUG] Posting subject-teacher relation:", json.dumps(payload, indent=2))
+
+    resp = requests.post(url, headers=headers, json=payload)
+    print(f"[Subject-Teacher API] status={resp.status_code}, response={resp.text}")
+
+    if resp.status_code != 200:
+        raise Exception(f"Insert subject-teacher relation failed (HTTP {resp.status_code}): {resp.text}")
+
+    return resp.json() if resp.text.strip() else {}
+
+
 
 
 # def insert_lesson_planner_payload(lesson_data):
@@ -253,15 +294,16 @@ def process_all():
         lesson_uuid = lesson_data["lesson_planner_UUID"]
 
         now = strftime("%Y-%m-%d,%H:%M:%S", gmtime())
-        tenantEmail = "sierracanyon@edyou.com" #Production Variable change to SC production email
+        tenantEmail = "sierracanyon@edyou.com"
         tenantName = "Sierra Canyon"
         icon = "https://pollydemo2022.s3.us-west-2.amazonaws.com/icons/homework.png"
 
         grade = lesson_data.get("grade", "")
         section = lesson_data.get("section", "")
         period = lesson_data.get("period", "")
+        teacher_id = lesson_data.get("teacher_id")   # <---- expects teacher_id in request JSON
 
-        # Dynamo insert
+        # Step 1: Dynamo insert
         item = {
             "id": lesson_uuid,
             "Created_at": now,
@@ -280,16 +322,25 @@ def process_all():
         }
         Grade_and_Subject.put_item(Item=item)
 
-        insert_into_school(tenantEmail, grade, section, period, subject)
+        # Step 2: Insert subject into school API
+        subject_id = insert_into_school(tenantEmail, grade, section, period, subject)
+
+        # Step 3: Insert subject-teacher relation
+        if subject_id and teacher_id:
+            insert_subject_teacher_relation(subject_id, teacher_id)
+
+        # Step 4: Insert lesson planner
         insert_lesson_planner_payload(lesson_data)
 
+        # Step 5: Update students
         for email in lesson_data.get("student", []):
             update_student_subject_list(email, lesson_uuid)
 
         return jsonify({
             "status": "success",
             "uuid": lesson_uuid,
-            "message": f"Subject {subject} inserted successfully, lesson planner stored, uuid assigned to {len(lesson_data.get('student', []))} students"
+            "message": f"Subject {subject} inserted successfully, lesson planner stored, "
+                       f"uuid assigned to {len(lesson_data.get('student', []))} students"
         })
     except Exception as e:
         return jsonify({"status": "error", "error": str(e), "trace": traceback.format_exc()}), 400
