@@ -479,10 +479,6 @@ def api_generate_icp():
 
 @app.route("/update_student_subjects", methods=["POST"])
 def api_update_student_subjects():
-    """
-    Update student subject_list in Investor table using the same payload as /process_all.
-    Only lesson_planner_UUID and student list are used.
-    """
     try:
         data = request.json
         body = data.get("body", {})
@@ -498,6 +494,7 @@ def api_update_student_subjects():
 
         updated = []
         not_found = []
+        already_linked = []
 
         for email in students:
             resp = Investor.get_item(Key={"email": email})
@@ -511,7 +508,9 @@ def api_update_student_subjects():
             student_item = resp["Item"]
             subject_list = student_item.get("subject_list", [])
 
-            if lesson_uuid not in subject_list:
+            if lesson_uuid in subject_list:
+                already_linked.append(student_item["email"])
+            else:
                 subject_list.append(lesson_uuid)
                 Investor.update_item(
                     Key={"email": student_item["email"]},
@@ -524,6 +523,7 @@ def api_update_student_subjects():
             "status": "success",
             "lesson_planner_UUID": lesson_uuid,
             "updated_students": updated,
+            "already_linked": already_linked,
             "not_found": not_found
         }), 200
 
