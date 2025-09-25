@@ -213,6 +213,49 @@ def update_student_subject_list(student_email, lesson_uuid):
     except Exception as e:
         print(f"Error updating student {student_email}: {e}")
 
+def get_student_id_by_email(email):
+    """
+    Fetch student_id for a given student email.
+    Uses fixed school_id=3.
+    """
+    url = "https://48czgcfeuc.execute-api.us-west-2.amazonaws.com/prod/query?query_name=get_student_by_email"
+    headers = {
+        "x-api-key": os.getenv("LESSON_PLANNER_API_KEY", "oxcoUnpFS89Cu43FvFMGa5ZA5C6Ykxd79sXnuJhh"),
+        "Content-Type": "application/json"
+    }
+    payload = {"email": email, "school_id": 3}
+    resp = requests.get(url, headers=headers, json=payload)
+    print(f"[GET Student] status={resp.status_code}, response={resp.text}")
+
+    if resp.status_code == 200 and resp.text.strip():
+        try:
+            body = resp.json()
+            if isinstance(body, list) and body:
+                return body[0].get("student_id")
+        except Exception as e:
+            print(f"Error parsing student response: {e}")
+    return None
+
+
+def assign_subject_to_student(student_id, subject_id):
+    """
+    Assign subject to student via API.
+    """
+    url = "https://48czgcfeuc.execute-api.us-west-2.amazonaws.com/prod/query?query_name=assign_subject_to_student"
+    headers = {
+        "x-api-key": os.getenv("LESSON_PLANNER_API_KEY", "oxcoUnpFS89Cu43FvFMGa5ZA5C6Ykxd79sXnuJhh"),
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "student_id": str(student_id),
+        "subject_id": str(subject_id),
+        "assigned_level_id": "",
+        "is_homeroom": "False",
+        "school_year_id": ""
+    }
+    resp = requests.post(url, headers=headers, json=payload)
+    print(f"[Assign Subject] status={resp.status_code}, response={resp.text}")
+    return resp.json() if resp.text.strip() else {}
 
 
 # -------- ITP Helpers --------
@@ -301,7 +344,7 @@ def process_all():
         grade = lesson_data.get("grade", "")
         section = lesson_data.get("section", "")
         period = lesson_data.get("period", "")
-        teacher_id = lesson_data.get("teacher_id")   # expects teacher_id in request JSON
+        teacher_id = lesson_data.get("teacher_id")
 
         print("=== [PROCESS_ALL START] ===")
 
@@ -332,6 +375,29 @@ def process_all():
         else:
             print("[STEP 2] Failed to insert into School API or subject_id missing")
 
+        # Step 2.5: Assign subject to students
+        assigned = []
+        not_found = []
+        failed = []
+
+        students = lesson_data.get("student", [])
+        if subject_id and students:
+            for student_email in students:
+                student_id = get_student_id_by_email(student_email)
+                if student_id:
+                    assign_resp = assign_subject_to_student(student_id, subject_id)
+                    if assign_resp.get("status") == "assigned":
+                        assigned.append({"email": student_email, "student_id": student_id})
+                        print(f"[STEP 2.5] Assigned subject {subject_id} to {student_email} (id={student_id})")
+                    else:
+                        failed.append({"email": student_email, "student_id": student_id, "resp": assign_resp})
+                        print(f"[STEP 2.5] Assignment failed for {student_email}: {assign_resp}")
+                else:
+                    not_found.append(student_email)
+                    print(f"[STEP 2.5] Could not fetch student_id for {student_email}")
+        else:
+            print("[STEP 2.5] Skipped subject assignment (no subject_id or students)")
+
         # Step 3: Insert subject-teacher relation
         if subject_id and teacher_id:
             insert_subject_teacher_relation(subject_id, teacher_id)
@@ -348,8 +414,11 @@ def process_all():
         return jsonify({
             "status": "success",
             "uuid": lesson_uuid,
-            "message": f"Subject {subject} inserted successfully, lesson planner stored."
-        })
+            "message": f"Subject {subject} inserted successfully, lesson planner stored.",
+            "assigned_students": assigned,
+            "not_found_students": not_found,
+            "failed_assignments": failed
+        }), 200
 
     except Exception as e:
         print("=== [PROCESS_ALL ERROR] ===")
@@ -359,7 +428,6 @@ def process_all():
             "error": str(e),
             "trace": traceback.format_exc()
         }), 400
-
 
 @app.route("/generate_itp", methods=["POST"])
 def api_generate_itp():
