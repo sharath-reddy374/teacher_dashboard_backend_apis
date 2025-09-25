@@ -343,18 +343,12 @@ def process_all():
         insert_lesson_planner_payload(lesson_data)
         print("[STEP 4] Inserted lesson planner into Postgres API")
 
-        # Step 5: Update students
-        for email in lesson_data.get("student", []):
-            update_student_subject_list(email, lesson_uuid)
-            print(f"[STEP 5] Updated student subject list for {email}")
-
         print("=== [PROCESS_ALL END SUCCESS] ===")
 
         return jsonify({
             "status": "success",
             "uuid": lesson_uuid,
-            "message": f"Subject {subject} inserted successfully, lesson planner stored, "
-                       f"uuid assigned to {len(lesson_data.get('student', []))} students"
+            "message": f"Subject {subject} inserted successfully, lesson planner stored."
         })
 
     except Exception as e:
@@ -482,6 +476,68 @@ def api_generate_icp():
                 }), 400 
 
 
+
+@app.route("/update_student_subjects", methods=["POST"])
+def api_update_student_subjects():
+    """
+    Update student subject_list in Investor table using the same payload as /process_all.
+    Only lesson_planner_UUID and student list are used.
+    """
+    try:
+        data = request.json
+        body = data.get("body", {})
+
+        lesson_uuid = body.get("lesson_planner_UUID")
+        students = body.get("student", [])
+
+        if not lesson_uuid or not students:
+            return jsonify({
+                "status": "error",
+                "message": "body.lesson_planner_UUID and body.student[] are required"
+            }), 400
+
+        updated = []
+        not_found = []
+
+        for email in students:
+            resp = Investor.get_item(Key={"email": email})
+            if "Item" not in resp and email.lower() != email:
+                resp = Investor.get_item(Key={"email": email.lower()})
+
+            if "Item" not in resp:
+                not_found.append(email)
+                continue
+
+            student_item = resp["Item"]
+            subject_list = student_item.get("subject_list", [])
+
+            if lesson_uuid not in subject_list:
+                subject_list.append(lesson_uuid)
+                Investor.update_item(
+                    Key={"email": student_item["email"]},
+                    UpdateExpression="SET subject_list = :s",
+                    ExpressionAttributeValues={":s": subject_list}
+                )
+                updated.append(student_item["email"])
+
+        return jsonify({
+            "status": "success",
+            "lesson_planner_UUID": lesson_uuid,
+            "updated_students": updated,
+            "not_found": not_found
+        }), 200
+
+    except Exception as e:
+        print("=== [UPDATE_STUDENT_SUBJECTS ERROR] ===")
+        print(traceback.format_exc())
+        return jsonify({
+            "status": "error",
+            "error": str(e),
+            "trace": traceback.format_exc()
+        }), 500
+
+
+
 def invoke_lambda(payload):
     # The name of your Lambda function
     function_name = 'createPredefinedModule'
@@ -502,6 +558,7 @@ def invoke_lambda(payload):
     result = json.loads(response_payload)
 
     return result
+
 
 
 
