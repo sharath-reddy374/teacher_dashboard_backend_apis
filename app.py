@@ -354,7 +354,7 @@ def process_all():
             "Created_at": now,
             "Grade": grade,
             "Grade_and_Subject": f"TD: {subject}",
-            "Grade_and_Subject_UI": subject,
+            "Grade_and_Subject_UI": f"{subject} - Assignment",
             "status": "Active",
             "Subject": subject,
             "tenantEmail": tenantEmail,
