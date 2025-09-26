@@ -56,6 +56,18 @@ subject_table = dynamodb.Table(os.getenv("SUBJECT_TABLE", "Grade_and_Subject"))
 Question_Prod = dynamodb.Table(os.getenv("QUIZ_TABLE", "Question"))
 User_ITP_Prod = dynamodb.Table(os.getenv("USER_ITP_TABLE", "User_Infinite_TestSeries"))
 
+# ------------------- AWS S3 -------------------
+s3_client = boto3.client(
+    "s3",
+    region_name=aws_region,
+    aws_access_key_id=aws_access_key,
+    aws_secret_access_key=aws_secret_key
+)
+
+BUCKET_NAME = "icp-image-gen" 
+
+
+
 
 # ------------------- API Endpoints -------------------
 url_insert_subject = os.getenv("URL_INSERT_SUBJECT")
@@ -64,6 +76,40 @@ url_insert_lesson_planner = os.getenv("URL_INSERT_LESSON_PLANNER")
 # url_itp_initialize = "https://t9or7o19o8.execute-api.us-west-2.amazonaws.com/itpGenerate/api/initialize" #dev
 url_itp_initialize = "https://nycoxziw67.execute-api.us-west-2.amazonaws.com/Production/api/initialize"
 url_icp_generate = os.getenv("URL_ICP_GENERATE")
+
+
+# ------------------- Upload URL Endpoint -------------------
+@app.route("/api/upload-url", methods=["POST"])
+def get_presigned_url():
+    try:
+        data = request.get_json()
+        filename = data.get("filename")
+        content_type = data.get("type")
+
+        if not filename or not content_type:
+            return jsonify({"error": "filename and type required"}), 400
+
+        key = f"teacher_uploaded_images/{int(time.time())}-{filename}"
+
+        presigned_url = s3_client.generate_presigned_url(
+            "put_object",
+            Params={
+                "Bucket": BUCKET_NAME,
+                "Key": key,
+                "ContentType": content_type,
+            },
+            ExpiresIn=60,
+        )
+
+        file_url = f"https://{BUCKET_NAME}.s3.{aws_region}.amazonaws.com/{key}"
+
+        return jsonify({"uploadUrl": presigned_url, "fileUrl": file_url})
+
+    except Exception as e:
+        print("=== [UPLOAD_URL ERROR] ===")
+        print(traceback.format_exc())
+        return jsonify({"error": str(e)}), 500
+
 
 # ------------------- Helper Functions -------------------
 def insert_into_school(tenantEmail, grade, section, period, grade_and_subject_ui):
