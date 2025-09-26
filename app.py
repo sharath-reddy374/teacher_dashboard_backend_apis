@@ -79,34 +79,34 @@ url_icp_generate = os.getenv("URL_ICP_GENERATE")
 
 
 # ------------------- Upload URL Endpoint -------------------
-@app.route("/api/upload-url", methods=["POST"])
-def get_presigned_url():
+# ------------------- Upload File Endpoint -------------------
+@app.route("/api/upload-file", methods=["POST"])
+def upload_file():
     try:
-        data = request.get_json()
-        filename = data.get("filename")
-        content_type = data.get("type")
+        if "file" not in request.files:
+            return jsonify({"error": "file is required"}), 400
 
-        if not filename or not content_type:
-            return jsonify({"error": "filename and type required"}), 400
+        file = request.files["file"]
+        filename = file.filename
 
+        # Key inside your S3 bucket folder
         key = f"teacher_uploaded_images/{int(time.time())}-{filename}"
 
-        presigned_url = s3_client.generate_presigned_url(
-            "put_object",
-            Params={
-                "Bucket": BUCKET_NAME,
-                "Key": key,
-                "ContentType": content_type,
-            },
-            ExpiresIn=60,
+        # Upload directly to S3
+        s3_client.upload_fileobj(
+            file,
+            BUCKET_NAME,
+            key,
+            ExtraArgs={"ContentType": file.content_type}
         )
 
+        # Build file URL (public if bucket policy/ACL allows, or serve via CloudFront)
         file_url = f"https://{BUCKET_NAME}.s3.{aws_region}.amazonaws.com/{key}"
 
-        return jsonify({"uploadUrl": presigned_url, "fileUrl": file_url})
+        return jsonify({"fileUrl": file_url}), 200
 
     except Exception as e:
-        print("=== [UPLOAD_URL ERROR] ===")
+        print("=== [UPLOAD_FILE ERROR] ===")
         print(traceback.format_exc())
         return jsonify({"error": str(e)}), 500
 
