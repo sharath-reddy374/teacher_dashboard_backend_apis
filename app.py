@@ -1,7 +1,3 @@
-"""
-Flask App with Integrated AI Question Generation API
-"""
-
 import os
 import json
 import boto3
@@ -569,9 +565,9 @@ def process_all():
         else:
             print("[STEP 3] Skipped subject-teacher relation (missing subject_id or teacher_id)")
 
-        # Step 4: Insert lesson planner
-        insert_lesson_planner_payload(lesson_data)
-        print("[STEP 4] Inserted lesson planner into Postgres API")
+        # # Step 4: Insert lesson planner
+        # insert_lesson_planner_payload(lesson_data)
+        # print("[STEP 4] Inserted lesson planner into Postgres API")
 
         print("=== [PROCESS_ALL END SUCCESS] ===")
 
@@ -723,6 +719,10 @@ def api_update_student_subjects():
                 "status": "error",
                 "message": "body.lesson_planner_UUID and body.student[] are required"
             }), 400
+
+        # --- Step 4 (moved here) ---
+        insert_lesson_planner_payload(body)
+        print("[STEP 4] Inserted lesson planner into Postgres API")
 
         updated = []
         not_found = []
