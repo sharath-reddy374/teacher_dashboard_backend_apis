@@ -1,16 +1,27 @@
+"""
+Flask App with Integrated AI Question Generation API
+"""
+
 import os
 import json
 import boto3
 import traceback
+import time
 from time import gmtime, strftime
 from decimal import Decimal
-import requests
-from flask import Flask, request, jsonify
-from dotenv import load_dotenv
-import time
 from datetime import datetime
-from flask_cors import CORS 
+from flask import Flask, request, jsonify
+from flask_cors import CORS
+from dotenv import load_dotenv
+import requests
+import logging
+from pydantic import BaseModel, Field, ValidationError
+from typing import List, Optional
+from openai import OpenAI
 
+# ------------------- Logging -------------------
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # ------------------- Load Env -------------------
 env = os.getenv("ENV", "Production")
@@ -18,10 +29,11 @@ dotenv_path = f".env.{env}"
 if os.path.exists(dotenv_path):
     load_dotenv(dotenv_path)
 
+# ------------------- Flask App -------------------
 app = Flask(__name__)
 CORS(
     app,
-    resources={r"/*": {"origins": r".*"}},   # echo any Origin back
+    resources={r"/*": {"origins": r".*"}},
     supports_credentials=True,
     allow_headers="*",
     expose_headers="*",
@@ -29,8 +41,7 @@ CORS(
     max_age=86400
 )
 
-
-# ------------------- AWS DynamoDB -------------------
+# ------------------- AWS Clients -------------------
 aws_access_key = os.getenv("AWS_ACCESS_KEY_ID")
 aws_secret_key = os.getenv("AWS_SECRET_ACCESS_KEY")
 aws_region = os.getenv("AWS_DEFAULT_REGION", "us-west-2")
@@ -42,21 +53,13 @@ dynamodb = boto3.resource(
     aws_secret_access_key=aws_secret_key
 )
 
-lambda_client = boto3.client('lambda',region_name=aws_region,
+lambda_client = boto3.client(
+    "lambda",
+    region_name=aws_region,
     aws_access_key_id=aws_access_key,
-    aws_secret_access_key=aws_secret_key)  
+    aws_secret_access_key=aws_secret_key
+)
 
-
-
-Grade_and_Subject = dynamodb.Table(os.getenv("GRADE_SUBJECT_TABLE", "Grade_and_Subject"))
-Investor = dynamodb.Table(os.getenv("INVESTOR_TABLE", "Investor"))
-# ICP = dynamodb.Table(os.getenv("ICP_TABLE", "ICP"))
-icp_table = dynamodb.Table(os.getenv("ICP_TABLE", "ICP"))
-subject_table = dynamodb.Table(os.getenv("SUBJECT_TABLE", "Grade_and_Subject"))
-Question_Prod = dynamodb.Table(os.getenv("QUIZ_TABLE", "Question"))
-User_ITP_Prod = dynamodb.Table(os.getenv("USER_ITP_TABLE", "User_Infinite_TestSeries"))
-
-# ------------------- AWS S3 -------------------
 s3_client = boto3.client(
     "s3",
     region_name=aws_region,
@@ -64,21 +67,183 @@ s3_client = boto3.client(
     aws_secret_access_key=aws_secret_key
 )
 
-BUCKET_NAME = "icp-image-gen" 
+# Dynamo Tables
+Grade_and_Subject = dynamodb.Table(os.getenv("GRADE_SUBJECT_TABLE", "Grade_and_Subject"))
+Investor = dynamodb.Table(os.getenv("INVESTOR_TABLE", "Investor"))
+icp_table = dynamodb.Table(os.getenv("ICP_TABLE", "ICP"))
+subject_table = dynamodb.Table(os.getenv("SUBJECT_TABLE", "Grade_and_Subject"))
+Question_Prod = dynamodb.Table(os.getenv("QUIZ_TABLE", "Question"))
+User_ITP_Prod = dynamodb.Table(os.getenv("USER_ITP_TABLE", "User_Infinite_TestSeries"))
 
+# S3
+BUCKET_NAME = "icp-image-gen"
 
-
-
-# ------------------- API Endpoints -------------------
+# External URLs
 url_insert_subject = os.getenv("URL_INSERT_SUBJECT")
 url_get_school = os.getenv("URL_GET_SCHOOL")
 url_insert_lesson_planner = os.getenv("URL_INSERT_LESSON_PLANNER")
-# url_itp_initialize = "https://t9or7o19o8.execute-api.us-west-2.amazonaws.com/itpGenerate/api/initialize" #dev
 url_itp_initialize = "https://nycoxziw67.execute-api.us-west-2.amazonaws.com/Production/api/initialize"
 url_icp_generate = os.getenv("URL_ICP_GENERATE")
 
+# ------------------- OpenAI Client -------------------
+try:
+    client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+except Exception as e:
+    logger.error(f"Failed to initialize OpenAI client: {e}")
+    raise
 
-# ------------------- Upload URL Endpoint -------------------
+# ==================== AI Question Generation Models ====================
+
+class QuizQuestion(BaseModel):
+    Question: str
+    options__001: str
+    description__001: str
+    options__002: str
+    description__002: str
+    options__003: str
+    description__003: str
+    options__004: str
+    description__004: str
+    CorrectAnswer: int = Field(..., ge=1, le=4)
+
+class QuizResponse(BaseModel):
+    questions: List[QuizQuestion]
+
+class GenerateRequest(BaseModel):
+    subject: str
+    topic: str
+    subtopic: Optional[str] = None
+    grade_level: str
+    difficulty: str = Field(..., pattern="^(easy|medium|hard)$")
+    learning_style: Optional[str] = None
+    additional_context: Optional[str] = None
+
+class GenerateResponse(BaseModel):
+    success: bool
+    question: Optional[QuizQuestion] = None
+    error_message: Optional[str] = None
+
+class RegenerateRequest(BaseModel):
+    current_question: dict
+    edit_instruction: str
+    subject: str
+    topic: str
+    grade_level: str
+    difficulty: str = Field(..., pattern="^(easy|medium|hard)$")
+
+class RegenerateResponse(BaseModel):
+    success: bool
+    regenerated_question: Optional[QuizQuestion] = None
+    changes_summary: Optional[List[str]] = None
+    error_message: Optional[str] = None
+
+# ==================== Helper Functions ====================
+
+def create_system_prompt():
+    return """You are an expert educator creating high-quality quiz questions.
+
+Requirements:
+1. Educationally valuable, not rote
+2. Clear, age-appropriate language
+3. Use LaTeX for math/science
+4. Explanations: 2-3 sentences
+5. Exactly one correct option
+"""
+
+def format_generate_prompt(request: GenerateRequest) -> str:
+    prompt = f"""Create a {request.difficulty} quiz question for {request.subject} 
+on {request.topic}{f' - {request.subtopic}' if request.subtopic else ''} 
+for {request.grade_level} students.
+
+- 4 MCQ options
+- Detailed explanations
+- Only one correct answer
+"""
+    if request.learning_style:
+        prompt += f"- Adapt for {request.learning_style} learners\n"
+    if request.additional_context:
+        prompt += f"Additional context: {request.additional_context}\n"
+    return prompt
+
+def format_regenerate_prompt(request: RegenerateRequest) -> str:
+    current = request.current_question
+    correct_answer = current.get('CorrectAnswer', 1)
+    return f"""Modify this quiz question with instruction: {request.edit_instruction}
+Keep subject={request.subject}, topic={request.topic}, grade={request.grade_level}, difficulty={request.difficulty}.
+Ensure all options and explanations are coherent and only one is correct.
+"""
+
+def detect_changes(current_question: dict, new_question: QuizQuestion) -> List[str]:
+    changes = []
+    if current_question.get('Question') != new_question.Question:
+        changes.append("Question text updated")
+    changes.append("All options and explanations regenerated")
+    return changes
+
+# ==================== AI Question Generation Endpoints ====================
+
+@app.route("/api/ai/generate-question", methods=["POST"])
+def generate_question():
+    try:
+        data = request.json
+        req = GenerateRequest(**data)
+
+        system_prompt = create_system_prompt()
+        user_prompt = format_generate_prompt(req)
+
+        response = client.beta.chat.completions.parse(
+            model="gpt-4o-2024-08-06",
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ],
+            response_format=QuizResponse
+        )
+
+        quiz_data = response.choices[0].message.parsed
+        question = quiz_data.questions[0]
+
+        return jsonify(GenerateResponse(success=True, question=question).dict()), 200
+
+    except ValidationError as ve:
+        return jsonify({"success": False, "error_message": str(ve)}), 400
+    except Exception as e:
+        logger.error(f"Error generating question: {str(e)}")
+        return jsonify({"success": False, "error_message": str(e)}), 500
+
+@app.route("/api/ai/regenerate-question", methods=["POST"])
+def regenerate_question():
+    try:
+        data = request.json
+        req = RegenerateRequest(**data)
+
+        system_prompt = create_system_prompt()
+        user_prompt = format_regenerate_prompt(req)
+
+        response = client.beta.chat.completions.parse(
+            model="gpt-4o-2024-08-06",
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ],
+            response_format=QuizResponse
+        )
+
+        quiz_data = response.choices[0].message.parsed
+        question = quiz_data.questions[0]
+        changes = detect_changes(req.current_question, question)
+
+        return jsonify(RegenerateResponse(success=True, regenerated_question=question, changes_summary=changes).dict()), 200
+
+    except ValidationError as ve:
+        return jsonify({"success": False, "error_message": str(ve)}), 400
+    except Exception as e:
+        logger.error(f"Error regenerating question: {str(e)}")
+        return jsonify({"success": False, "error_message": str(e)}), 500
+
+# ==================== Your Existing Flask Endpoints ====================
+
+
 # ------------------- Upload File Endpoint -------------------
 @app.route("/api/upload-file", methods=["POST"])
 def upload_file():
@@ -179,21 +344,6 @@ def insert_subject_teacher_relation(subject_id, teacher_id):
         raise Exception(f"Insert subject-teacher relation failed (HTTP {resp.status_code}): {resp.text}")
 
     return resp.json() if resp.text.strip() else {}
-
-
-
-
-# def insert_lesson_planner_payload(lesson_data):
-#     headers = {
-#         "x-api-key": os.getenv("LESSON_PLANNER_API_KEY"),
-#         "Content-Type": "application/json"
-#     }
-#     try:
-#         payload = {"lesson_planner": lesson_data}
-#         resp = requests.post(url_insert_lesson_planner, headers=headers, data=json.dumps(payload))
-#         print(f"Lesson planner insert response: {resp.text}")
-#     except Exception as e:
-#         print(f"Failed to insert lesson planner payload: {e}")
 
 def insert_lesson_planner_payload(lesson_data):
     """
@@ -303,7 +453,6 @@ def assign_subject_to_student(student_id, subject_id):
     print(f"[Assign Subject] status={resp.status_code}, response={resp.text}")
     return resp.json() if resp.text.strip() else {}
 
-
 # -------- ITP Helpers --------
 def initialize_itp(itp_payload):
     headers = {"Content-Type": "application/json"}
@@ -341,37 +490,6 @@ def check_itp_status_local(itp_id, user_id=None, pre_defined=True):
     except Exception as e:
         print("Error checking ITP status:", e)
         return {"statusCode": 500, "error": str(e)}
-
-
-# # -------- ICP Helpers --------
-# def store_icp_direct(course_data, email, topic_id):
-#     """
-#     Save generated ICP course into DynamoDB (ICP_TABLE).
-#     """
-#     try:
-#         def convert_numbers(obj):
-#             if isinstance(obj, float):
-#                 return Decimal(str(obj))
-#             elif isinstance(obj, dict):
-#                 return {k: convert_numbers(v) for k, v in obj.items()}
-#             elif isinstance(obj, list):
-#                 return [convert_numbers(v) for v in obj]
-#             return obj
-
-#         icp_item = {
-#             "email": email.lower(),
-#             "id": topic_id,
-#             "course": convert_numbers(course_data["course"])
-#         }
-
-#         ICP.put_item(Item=icp_item)
-#         print(f"[ICP STORE] Saved ICP for email={email}, id={topic_id}")
-#         return {"statusCode": 200, "body": {"message": "Stored in DynamoDB", "id": topic_id, "email": email}}
-
-#     except Exception as e:
-#         print(f"[ICP STORE ERROR] {e}")
-#         return {"statusCode": 500, "body": {"message": f"Error storing course: {str(e)}"}}
-
 
 # ------------------- Flask Endpoints -------------------
 @app.route("/process_all", methods=["POST"])
@@ -675,6 +793,8 @@ def invoke_lambda(payload):
 
 
 
+
+# ==================== Run ====================
 
 if __name__ == "__main__":
     app.run(debug=True, port=5000)
