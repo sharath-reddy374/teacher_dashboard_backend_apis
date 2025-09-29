@@ -138,12 +138,23 @@ class RegenerateResponse(BaseModel):
 def create_system_prompt():
     return """You are an expert educator creating high-quality quiz questions.
 
-Requirements:
-1. Educationally valuable, not rote
-2. Clear, age-appropriate language
-3. Use LaTeX for math/science
-4. Explanations: 2-3 sentences
-5. Exactly one correct option
+STRICT FORMATTING AND CONTENT RULES:
+1. Question Type Variety:
+   - Include a mix of fact-based and application-based questions
+   - Do NOT ask questions that ask to explain or describe a solution
+   - Do NOT include any questions that require drawing graphs, diagrams, or expressing on a number line
+   - Do NOT ask questions that refer to graphs, diagrams, or number lines to solve
+
+2. Mathematical Expression Formatting (MANDATORY):
+   - ALWAYS use \\(...\\) for inline math expressions
+   - ALWAYS use \\[...\\] for block/display math expressions
+   - Never use $...$ or $$...$$ notation
+
+3. Explanation Format (MUST FOLLOW EXACTLY):
+   - For CORRECT answers: Start with "is correct because [explanation]"
+   - For INCORRECT answers: Start with "is incorrect because [explanation]"
+   - Do NOT include any text before these phrases
+   - The option letter/number will be added by the backend
 """
 
 def format_generate_prompt(request: GenerateRequest) -> str:
@@ -151,9 +162,24 @@ def format_generate_prompt(request: GenerateRequest) -> str:
 on {request.topic}{f' - {request.subtopic}' if request.subtopic else ''} 
 for {request.grade_level} students.
 
-- 4 MCQ options
-- Detailed explanations
-- Only one correct answer
+Requirements:
+- Create exactly 4 multiple choice options
+- STRICT CONTENT RULES:
+  * Include a mix of fact-based and application-based questions
+  * Do NOT ask questions that ask to explain or describe a solution
+  * Do NOT include questions requiring drawing graphs/diagrams/number lines
+  * Do NOT ask questions that refer to graphs/diagrams/number lines to solve
+- STRICT MATH FORMATTING:
+  * Use \\(...\\) for ALL inline mathematical expressions
+  * Use \\[...\\] for ALL block/display mathematical expressions
+  * NEVER use $...$ or $$...$$ delimiters
+- STRICT EXPLANATION FORMAT:
+  * Correct answer: "is correct because [detailed explanation]"
+  * Incorrect answers: "is incorrect because [detailed explanation]"
+  * Start explanations EXACTLY with these phrases (no text before)
+  * Provide specific explanations that address misconceptions
+- Ensure only one correct answer
+- Options should be labeled as A, B, C, D in the options__00X fields
 """
     if request.learning_style:
         prompt += f"- Adapt for {request.learning_style} learners\n"
@@ -166,7 +192,26 @@ def format_regenerate_prompt(request: RegenerateRequest) -> str:
     correct_answer = current.get('CorrectAnswer', 1)
     return f"""Modify this quiz question with instruction: {request.edit_instruction}
 Keep subject={request.subject}, topic={request.topic}, grade={request.grade_level}, difficulty={request.difficulty}.
-Ensure all options and explanations are coherent and only one is correct.
+Requirements:
+- Regenerate the COMPLETE question with all coherent parts
+- Update ALL options and descriptions to match the changes
+- Maintain {request.difficulty} difficulty level for {request.grade_level}
+- STRICT CONTENT RULES:
+  * Include a mix of fact-based and application-based questions
+  * Do NOT ask questions that ask to explain or describe a solution
+  * Do NOT include questions requiring drawing graphs/diagrams/number lines
+  * Do NOT ask questions that refer to graphs/diagrams/number lines to solve
+- STRICT MATH FORMATTING:
+  * Use \\(...\\) for ALL inline mathematical expressions
+  * Use \\[...\\] for ALL block/display mathematical expressions
+  * NEVER use $...$ or $$...$$ delimiters
+- STRICT EXPLANATION FORMAT:
+  * Correct answer: "is correct because [detailed explanation]"
+  * Incorrect answers: "is incorrect because [detailed explanation]"
+  * Start explanations EXACTLY with these phrases (no text before)
+  * Provide specific explanations that address misconceptions
+- Keep the subject ({request.subject}) and topic ({request.topic}) consistent
+- Options should be labeled as A, B, C, D in the options__00X fields
 """
 
 def detect_changes(current_question: dict, new_question: QuizQuestion) -> List[str]:
