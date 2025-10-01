@@ -457,11 +457,15 @@ def get_student_id_by_email(email):
     """
     url = "https://48czgcfeuc.execute-api.us-west-2.amazonaws.com/prod/query?query_name=get_student_by_email"
     headers = {
-        "x-api-key": os.getenv("LESSON_PLANNER_API_KEY", "oxcoUnpFS89Cu43FvFMGa5ZA5C6Ykxd79sXnuJhh"),
+        "x-api-key": os.getenv("LESSON_PLANNER_API_KEY"),
         "Content-Type": "application/json"
     }
-    payload = {"email": email, "school_id": 3}
-    resp = requests.get(url, headers=headers, json=payload)
+
+    # Ensure lowercase email for lookup
+    payload = {"email": email.lower(), "school_id": 3}
+
+    # Use params instead of json for GET
+    resp = requests.get(url, headers=headers, params=payload)
     print(f"[GET Student] status={resp.status_code}, response={resp.text}")
 
     if resp.status_code == 200 and resp.text.strip():
@@ -469,9 +473,12 @@ def get_student_id_by_email(email):
             body = resp.json()
             if isinstance(body, list) and body:
                 return body[0].get("student_id")
+            elif isinstance(body, dict):
+                return body.get("student_id")
         except Exception as e:
             print(f"Error parsing student response: {e}")
     return None
+
 
 
 def assign_subject_to_student(student_id, subject_id):
