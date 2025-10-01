@@ -573,53 +573,82 @@ def process_all():
         Grade_and_Subject.put_item(Item=item)
         print("[STEP 1] Inserted into DynamoDB Grade_and_Subject")
 
-        # Step 2: Insert subject into school API
-        subject_id = insert_into_school(tenantEmail, grade, section, period, subject)
-        if subject_id:
-            print(f"[STEP 2] Inserted into School API, subject_id={subject_id}")
-        else:
-            print("[STEP 2] Failed to insert into School API or subject_id missing")
+        # Step 2: Insert subject via School API
+        subject_id = None
+        subject_resp = None
+        try:
+            headers = {
+                "x-api-key": os.getenv("LESSON_PLANNER_API_KEY"),
+                "Content-Type": "application/json"
+            }
+            school_resp = requests.post(
+                url_get_school,
+                headers=headers,
+                data=json.dumps({"email": tenantEmail})
+            )
+            school_id = None
+            if school_resp.text.strip():
+                school_data = school_resp.json()
+                if isinstance(school_data, list) and school_data:
+                    school_id = school_data[0].get("school_id")
 
-        # Step 2.5: Assign subject to students
+            if school_id:
+                payload = {
+                    "name": subject,
+                    "grade": grade,
+                    "section": section,
+                    "school_id": school_id,
+                    "period": period
+                }
+                resp = requests.post(url_insert_subject, headers=headers, json=payload)
+                print(f"[Insert Subject API] status={resp.status_code}, response={resp.text}")
+
+                if resp.status_code == 200 and resp.text.strip():
+                    subject_resp = resp.json()
+                    subject_id = subject_resp.get("inserted_subject_id")
+        except Exception as e:
+            print(f"Error inserting subject: {e}")
+
         assigned = []
         not_found = []
         failed = []
 
-        students = lesson_data.get("student", [])
-        if subject_id and students:
-            for student_email in students:
-                student_id = get_student_id_by_email(student_email)
-                if student_id:
-                    assign_resp = assign_subject_to_student(student_id, subject_id)
-                    if assign_resp.get("status") == "assigned":
-                        assigned.append({"email": student_email, "student_id": student_id})
-                        print(f"[STEP 2.5] Assigned subject {subject_id} to {student_email} (id={student_id})")
+        # Step 2.5 & 3 only if new subject was inserted (not already_exists)
+        if subject_resp and subject_resp.get("status") == "Query executed":
+            # Step 2.5: Assign subject to students
+            students = lesson_data.get("student", [])
+            if subject_id and students:
+                for student_email in students:
+                    student_id = get_student_id_by_email(student_email)
+                    if student_id:
+                        assign_resp = assign_subject_to_student(student_id, subject_id)
+                        if assign_resp.get("status") == "assigned":
+                            assigned.append({"email": student_email, "student_id": student_id})
+                            print(f"[STEP 2.5] Assigned subject {subject_id} to {student_email} (id={student_id})")
+                        else:
+                            failed.append({"email": student_email, "student_id": student_id, "resp": assign_resp})
+                            print(f"[STEP 2.5] Assignment failed for {student_email}: {assign_resp}")
                     else:
-                        failed.append({"email": student_email, "student_id": student_id, "resp": assign_resp})
-                        print(f"[STEP 2.5] Assignment failed for {student_email}: {assign_resp}")
-                else:
-                    not_found.append(student_email)
-                    print(f"[STEP 2.5] Could not fetch student_id for {student_email}")
-        else:
-            print("[STEP 2.5] Skipped subject assignment (no subject_id or students)")
+                        not_found.append(student_email)
+                        print(f"[STEP 2.5] Could not fetch student_id for {student_email}")
 
-        # Step 3: Insert subject-teacher relation
-        if subject_id and teacher_id:
-            insert_subject_teacher_relation(subject_id, teacher_id)
-            print(f"[STEP 3] Inserted subject-teacher relation (subject_id={subject_id}, teacher_id={teacher_id})")
-        else:
-            print("[STEP 3] Skipped subject-teacher relation (missing subject_id or teacher_id)")
+            # Step 3: Insert subject-teacher relation
+            if subject_id and teacher_id:
+                insert_subject_teacher_relation(subject_id, teacher_id)
+                print(f"[STEP 3] Inserted subject-teacher relation (subject_id={subject_id}, teacher_id={teacher_id})")
+            else:
+                print("[STEP 3] Skipped subject-teacher relation (missing subject_id or teacher_id)")
 
-        # # Step 4: Insert lesson planner
-        # insert_lesson_planner_payload(lesson_data)
-        # print("[STEP 4] Inserted lesson planner into Postgres API")
+        elif subject_resp and subject_resp.get("status") == "already_exists":
+            print(f"[STEP 2] Subject already exists, skipping Step 2.5 and 3 (subject_id={subject_id})")
 
         print("=== [PROCESS_ALL END SUCCESS] ===")
 
         return jsonify({
             "status": "success",
             "uuid": lesson_uuid,
-            "message": f"Subject {subject} inserted successfully, lesson planner stored.",
+            "subject_id": subject_id,
+            "message": f"Subject {subject} processed successfully.",
             "assigned_students": assigned,
             "not_found_students": not_found,
             "failed_assignments": failed
@@ -633,6 +662,7 @@ def process_all():
             "error": str(e),
             "trace": traceback.format_exc()
         }), 400
+
 
 @app.route("/generate_itp", methods=["POST"])
 def api_generate_itp():
